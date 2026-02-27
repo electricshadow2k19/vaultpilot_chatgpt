@@ -1,0 +1,113 @@
+service: vaultpilot-accounts-api
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+  stage: ${opt:stage, 'prod'}
+  environment:
+    ACCOUNTS_TABLE: vaultpilot-accounts-${self:provider.stage}
+    CREDENTIALS_TABLE: vaultpilot-credentials-${self:provider.stage}
+    AUDIT_TABLE: vaultpilot-audit-logs-${self:provider.stage}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:PutItem
+        - dynamodb:GetItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+        - dynamodb:Query
+        - dynamodb:Scan
+      Resource:
+        - arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.ACCOUNTS_TABLE}
+        - arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.CREDENTIALS_TABLE}
+        - arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.AUDIT_TABLE}
+    - Effect: Allow
+      Action:
+        - sts:AssumeRole
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - iam:ListUsers
+        - iam:ListAccessKeys
+        - secretsmanager:ListSecrets
+      Resource: '*'
+
+functions:
+  listAccounts:
+    handler: src/index.listAccounts
+    events:
+      - http:
+          path: /accounts
+          method: get
+          cors: true
+
+  getAccount:
+    handler: src/index.getAccount
+    events:
+      - http:
+          path: /accounts/{accountId}
+          method: get
+          cors: true
+
+  addAccount:
+    handler: src/index.addAccount
+    events:
+      - http:
+          path: /accounts
+          method: post
+          cors: true
+
+  updateAccount:
+    handler: src/index.updateAccount
+    events:
+      - http:
+          path: /accounts/{accountId}
+          method: put
+          cors: true
+
+  deleteAccount:
+    handler: src/index.deleteAccount
+    events:
+      - http:
+          path: /accounts/{accountId}
+          method: delete
+          cors: true
+
+  testConnection:
+    handler: src/index.testConnection
+    events:
+      - http:
+          path: /accounts/test
+          method: post
+          cors: true
+
+  scanAccount:
+    handler: src/index.scanAccount
+    events:
+      - http:
+          path: /accounts/{accountId}/scan
+          method: post
+          cors: true
+
+resources:
+  Resources:
+    AccountsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.ACCOUNTS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        Tags:
+          - Key: Environment
+            Value: ${self:provider.stage}
+          - Key: Application
+            Value: VaultPilot
+
+plugins:
+  - serverless-offline

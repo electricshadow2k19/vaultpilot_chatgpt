@@ -1,0 +1,425 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VaultPilot - AWS Accounts Management API'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    Description: Environment name
+
+  ExistingApiId:
+    Type: String
+    Description: Existing API Gateway ID from main stack
+    Default: ''
+
+Resources:
+  # ========================================
+  # DYNAMODB TABLE FOR ACCOUNTS
+  # ========================================
+  
+  AccountsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'vaultpilot-accounts-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: VaultPilot
+
+  # ========================================
+  # LAMBDA EXECUTION ROLE
+  # ========================================
+  
+  AccountsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'VaultPilot-Accounts-Lambda-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AccountsAPIPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt AccountsTable.Arn
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/vaultpilot-credentials-${Environment}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/vaultpilot-audit-logs-${Environment}'
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:ListUsers
+                  - iam:ListAccessKeys
+                  - secretsmanager:ListSecrets
+                Resource: '*'
+
+  # ========================================
+  # LAMBDA FUNCTIONS
+  # ========================================
+  
+  AccountsAPIFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'vaultpilot-accounts-api-${Environment}'
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt AccountsLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ACCOUNTS_TABLE: !Ref AccountsTable
+          CREDENTIALS_TABLE: !Sub 'vaultpilot-credentials-${Environment}'
+          AUDIT_TABLE: !Sub 'vaultpilot-audit-logs-${Environment}'
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          // This is a combined Lambda function handler that routes to different functions
+          // In production, you would deploy the actual code from backend/accounts/src/index.js
+          
+          const AWS = require('aws-sdk');
+          const { v4: uuidv4 } = require('uuid');
+          
+          const dynamodb = new AWS.DynamoDB.DocumentClient();
+          
+          exports.handler = async (event) => {
+            console.log('Event:', JSON.stringify(event));
+            
+            const headers = {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+              'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
+            };
+            
+            try {
+              const path = event.path || event.rawPath || '';
+              const method = event.httpMethod || event.requestContext?.http?.method || '';
+              
+              // Route to appropriate handler
+              if (path === '/accounts' && method === 'GET') {
+                return await listAccounts();
+              } else if (path.match(/\/accounts\/[^\/]+$/) && method === 'GET') {
+                return await getAccount(event);
+              } else if (path === '/accounts' && method === 'POST') {
+                return await addAccount(event);
+              } else if (path.match(/\/accounts\/[^\/]+$/) && method === 'PUT') {
+                return await updateAccount(event);
+              } else if (path.match(/\/accounts\/[^\/]+$/) && method === 'DELETE') {
+                return await deleteAccount(event);
+              } else if (path === '/accounts/test' && method === 'POST') {
+                return await testConnection(event);
+              } else if (path.match(/\/accounts\/[^\/]+\/scan$/) && method === 'POST') {
+                return await scanAccount(event);
+              }
+              
+              return {
+                statusCode: 404,
+                headers,
+                body: JSON.stringify({ error: 'Not found' })
+              };
+            } catch (error) {
+              console.error('Handler error:', error);
+              return {
+                statusCode: 500,
+                headers,
+                body: JSON.stringify({ error: error.message })
+              };
+            }
+          };
+          
+          async function listAccounts() {
+            const result = await dynamodb.scan({
+              TableName: process.env.ACCOUNTS_TABLE
+            }).promise();
+            
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify({
+                accounts: result.Items || [],
+                count: result.Items ? result.Items.length : 0
+              })
+            };
+          }
+          
+          async function getAccount(event) {
+            const accountId = event.pathParameters?.accountId || event.path.split('/').pop();
+            
+            const result = await dynamodb.get({
+              TableName: process.env.ACCOUNTS_TABLE,
+              Key: { id: accountId }
+            }).promise();
+            
+            if (!result.Item) {
+              return {
+                statusCode: 404,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({ error: 'Account not found' })
+              };
+            }
+            
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify(result.Item)
+            };
+          }
+          
+          async function addAccount(event) {
+            const body = JSON.parse(event.body);
+            
+            const account = {
+              id: uuidv4(),
+              name: body.name,
+              accountId: body.accountId,
+              roleArn: body.roleArn,
+              externalId: body.externalId,
+              regions: body.regions || ['us-east-1'],
+              status: 'active',
+              lastScan: null,
+              credentialsFound: 0,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            };
+            
+            await dynamodb.put({
+              TableName: process.env.ACCOUNTS_TABLE,
+              Item: account
+            }).promise();
+            
+            return {
+              statusCode: 201,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify({
+                message: 'Account added successfully',
+                account: account
+              })
+            };
+          }
+          
+          async function updateAccount(event) {
+            const accountId = event.pathParameters?.accountId || event.path.split('/').pop();
+            const body = JSON.parse(event.body);
+            
+            const result = await dynamodb.update({
+              TableName: process.env.ACCOUNTS_TABLE,
+              Key: { id: accountId },
+              UpdateExpression: 'SET #name = :name, updatedAt = :updatedAt',
+              ExpressionAttributeNames: { '#name': 'name' },
+              ExpressionAttributeValues: {
+                ':name': body.name,
+                ':updatedAt': new Date().toISOString()
+              },
+              ReturnValues: 'ALL_NEW'
+            }).promise();
+            
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify({
+                message: 'Account updated successfully',
+                account: result.Attributes
+              })
+            };
+          }
+          
+          async function deleteAccount(event) {
+            const accountId = event.pathParameters?.accountId || event.path.split('/').pop();
+            
+            await dynamodb.delete({
+              TableName: process.env.ACCOUNTS_TABLE,
+              Key: { id: accountId }
+            }).promise();
+            
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify({ message: 'Account deleted successfully' })
+            };
+          }
+          
+          async function testConnection(event) {
+            const body = JSON.parse(event.body);
+            
+            const sts = new AWS.STS();
+            
+            try {
+              await sts.assumeRole({
+                RoleArn: body.roleArn,
+                RoleSessionName: 'VaultPilotTest',
+                ExternalId: body.externalId,
+                DurationSeconds: 900
+              }).promise();
+              
+              return {
+                statusCode: 200,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({
+                  success: true,
+                  message: 'Connection successful!'
+                })
+              };
+            } catch (error) {
+              return {
+                statusCode: 403,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({
+                  success: false,
+                  error: error.message
+                })
+              };
+            }
+          }
+          
+          async function scanAccount(event) {
+            // Placeholder - full implementation in backend/accounts/src/index.js
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify({
+                message: 'Scan initiated',
+                credentialsFound: 0
+              })
+            };
+          }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ========================================
+  # API GATEWAY ROUTES
+  # ========================================
+  
+  AccountsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ExistingApiId
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AccountsAPIFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  ListAccountsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ExistingApiId
+      RouteKey: 'GET /accounts'
+      Target: !Sub 'integrations/${AccountsIntegration}'
+
+  GetAccountRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ExistingApiId
+      RouteKey: 'GET /accounts/{accountId}'
+      Target: !Sub 'integrations/${AccountsIntegration}'
+
+  AddAccountRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ExistingApiId
+      RouteKey: 'POST /accounts'
+      Target: !Sub 'integrations/${AccountsIntegration}'
+
+  UpdateAccountRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ExistingApiId
+      RouteKey: 'PUT /accounts/{accountId}'
+      Target: !Sub 'integrations/${AccountsIntegration}'
+
+  DeleteAccountRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ExistingApiId
+      RouteKey: 'DELETE /accounts/{accountId}'
+      Target: !Sub 'integrations/${AccountsIntegration}'
+
+  TestConnectionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ExistingApiId
+      RouteKey: 'POST /accounts/test'
+      Target: !Sub 'integrations/${AccountsIntegration}'
+
+  ScanAccountRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ExistingApiId
+      RouteKey: 'POST /accounts/{accountId}/scan'
+      Target: !Sub 'integrations/${AccountsIntegration}'
+
+  AccountsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AccountsAPIFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ExistingApiId}/*'
+
+Outputs:
+  AccountsTableName:
+    Description: 'DynamoDB Accounts Table Name'
+    Value: !Ref AccountsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-AccountsTable'
+
+  AccountsAPIFunctionArn:
+    Description: 'Accounts API Lambda Function ARN'
+    Value: !GetAtt AccountsAPIFunction.Arn
+
+  AccountsAPIFunctionName:
+    Description: 'Accounts API Lambda Function Name'
+    Value: !Ref AccountsAPIFunction

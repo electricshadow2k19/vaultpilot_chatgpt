@@ -1,0 +1,25 @@
+{
+  "name": "vaultpilot-accounts-api",
+  "version": "1.0.0",
+  "description": "VaultPilot AWS Account Management API",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "deploy": "serverless deploy"
+  },
+  "keywords": ["vaultpilot", "aws", "accounts", "api"],
+  "author": "VaultPilot",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.400.0",
+    "@aws-sdk/lib-dynamodb": "^3.400.0",
+    "@aws-sdk/client-sts": "^3.400.0",
+    "@aws-sdk/client-iam": "^3.400.0",
+    "@aws-sdk/client-secrets-manager": "^3.400.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "serverless": "^3.38.0",
+    "serverless-offline": "^13.0.0"
+  }
+}

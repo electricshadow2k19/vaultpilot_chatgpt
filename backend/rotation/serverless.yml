@@ -1,0 +1,88 @@
+service: vaultpilot-rotation
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  environment:
+    DYNAMODB_TABLE: ${self:custom.dynamodb.table}
+    SECRETS_MANAGER_PREFIX: ${self:custom.secretsManager.prefix}
+    SNS_TOPIC_ARN: ${self:custom.sns.topicArn}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+        - dynamodb:Scan
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+      Resource: "arn:aws:dynamodb:${self:provider.region}:*:table/${self:custom.dynamodb.table}"
+    - Effect: Allow
+      Action:
+        - secretsmanager:GetSecretValue
+        - secretsmanager:UpdateSecret
+        - secretsmanager:CreateSecret
+        - secretsmanager:DeleteSecret
+        - secretsmanager:DescribeSecret
+        - secretsmanager:ListSecrets
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - ssm:GetParameter
+        - ssm:PutParameter
+        - ssm:DeleteParameter
+        - ssm:DescribeParameters
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - iam:CreateAccessKey
+        - iam:DeleteAccessKey
+        - iam:ListAccessKeys
+        - iam:UpdateAccessKey
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - sns:Publish
+      Resource: "${self:custom.sns.topicArn}"
+    - Effect: Allow
+      Action:
+        - ecs:UpdateService
+        - ecs:DescribeServices
+        - lambda:UpdateFunctionConfiguration
+        - lambda:GetFunctionConfiguration
+      Resource: "*"
+
+functions:
+  rotation:
+    handler: dist/index.rotation
+    events:
+      - schedule: rate(1 day)
+      - http:
+          path: /rotation
+          method: post
+          cors: true
+    timeout: 900
+    memorySize: 1024
+
+  rotateCredential:
+    handler: dist/index.rotateCredential
+    events:
+      - http:
+          path: /rotation/{credentialId}
+          method: post
+          cors: true
+    timeout: 300
+    memorySize: 512
+
+custom:
+  dynamodb:
+    table: vaultpilot-credentials-${self:provider.stage}
+  secretsManager:
+    prefix: vaultpilot/${self:provider.stage}
+  sns:
+    topicArn: arn:aws:sns:${self:provider.region}:*:vaultpilot-notifications-${self:provider.stage}
+
+# plugins:
+#   - serverless-offline

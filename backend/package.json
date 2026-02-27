@@ -1,0 +1,40 @@
+{
+  "name": "vaultpilot-backend",
+  "version": "1.0.0",
+  "description": "VaultPilot Backend - AWS Lambda functions for credential management",
+  "main": "index.js",
+  "scripts": {
+    "build": "npm run build:all",
+    "build:all": "npm run build:discovery && npm run build:rotation && npm run build:audit && npm run build:notifier",
+    "build:discovery": "cd discovery && npm run build",
+    "build:rotation": "cd rotation && npm run build",
+    "build:audit": "cd audit && npm run build",
+    "build:notifier": "cd notifier && npm run build",
+    "deploy": "npm run deploy:all",
+    "deploy:all": "npm run deploy:discovery && npm run deploy:rotation && npm run deploy:audit && npm run deploy:notifier",
+    "deploy:discovery": "cd discovery && npm run deploy",
+    "deploy:rotation": "cd rotation && npm run deploy",
+    "deploy:audit": "cd audit && npm run deploy",
+    "deploy:notifier": "cd notifier && npm run deploy",
+    "test": "npm run test:all",
+    "test:all": "npm run test:discovery && npm run test:rotation && npm run test:audit && npm run test:notifier",
+    "test:discovery": "cd discovery && npm test",
+    "test:rotation": "cd rotation && npm test",
+    "test:audit": "cd audit && npm test",
+    "test:notifier": "cd notifier && npm test"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.119",
+    "@types/node": "^18.15.11",
+    "typescript": "^4.9.5",
+    "aws-sdk": "^2.1404.0",
+    "serverless": "^3.25.0",
+    "serverless-offline": "^12.0.4"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1404.0",
+    "jsonwebtoken": "^9.0.0",
+    "bcryptjs": "^2.4.3",
+    "uuid": "^9.0.0"
+  }
+}

@@ -1,0 +1,59 @@
+service: vaultpilot-discovery
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  environment:
+    DYNAMODB_TABLE: ${self:custom.dynamodb.table}
+    SECRETS_MANAGER_PREFIX: ${self:custom.secretsManager.prefix}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+        - dynamodb:Scan
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+      Resource: "arn:aws:dynamodb:${self:provider.region}:*:table/${self:custom.dynamodb.table}"
+    - Effect: Allow
+      Action:
+        - secretsmanager:GetSecretValue
+        - secretsmanager:DescribeSecret
+        - secretsmanager:ListSecrets
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - ssm:GetParameter
+        - ssm:GetParameters
+        - ssm:DescribeParameters
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - iam:ListAccessKeys
+        - iam:GetAccessKeyLastUsed
+        - iam:ListUsers
+      Resource: "*"
+
+functions:
+  discovery:
+    handler: dist/index.discovery
+    events:
+      - schedule: rate(1 hour)
+      - http:
+          path: /discovery
+          method: post
+          cors: true
+    timeout: 300
+    memorySize: 512
+
+custom:
+  dynamodb:
+    table: vaultpilot-credentials-${self:provider.stage}
+  secretsManager:
+    prefix: vaultpilot/${self:provider.stage}
+
+plugins:
+  - serverless-offline

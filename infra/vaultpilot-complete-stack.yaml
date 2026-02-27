@@ -1,0 +1,825 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VaultPilot - Complete Production Stack with Lambda Functions, API Gateway, Cognito, and DynamoDB'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    Description: Environment name (dev, staging, prod)
+
+Resources:
+  # ========================================
+  # IAM ROLES
+  # ========================================
+  
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'VaultPilot-Lambda-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VaultPilotLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # DynamoDB Access
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt CredentialsTable.Arn
+                  - !GetAtt AuditLogsTable.Arn
+              
+              # IAM Access (for rotating IAM keys)
+              - Effect: Allow
+                Action:
+                  - iam:ListUsers
+                  - iam:ListAccessKeys
+                  - iam:CreateAccessKey
+                  - iam:DeleteAccessKey
+                  - iam:UpdateAccessKey
+                  - iam:GetUser
+                Resource: '*'
+              
+              # Secrets Manager Access
+              - Effect: Allow
+                Action:
+                  - secretsmanager:ListSecrets
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:RotateSecret
+                  - secretsmanager:PutSecretValue
+                Resource: '*'
+              
+              # Systems Manager Parameter Store
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                  - ssm:DescribeParameters
+                Resource: '*'
+              
+              # RDS Access (for rotating DB passwords)
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                  - rds:ModifyDBInstance
+                Resource: '*'
+              
+              # SNS for notifications
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+              
+              # ECS for service restart
+              - Effect: Allow
+                Action:
+                  - ecs:ListServices
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - ecs:ListTasks
+                Resource: '*'
+
+  # ========================================
+  # DYNAMODB TABLES
+  # ========================================
+  
+  CredentialsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'vaultpilot-credentials-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: tenantId
+          AttributeType: S
+        - AttributeName: expiresIn
+          AttributeType: N
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: TenantIndex
+          KeySchema:
+            - AttributeName: tenantId
+              KeyType: HASH
+            - AttributeName: expiresIn
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: VaultPilot
+
+  AuditLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'vaultpilot-audit-logs-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: VaultPilot
+
+  # ========================================
+  # COGNITO USER POOL
+  # ========================================
+  
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'vaultpilot-users-${Environment}'
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: false
+        - Name: name
+          Required: true
+          Mutable: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub 'vaultpilot-web-${Environment}'
+      UserPoolId: !Ref UserPool
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      RefreshTokenValidity: 30
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      TokenValidityUnits:
+        RefreshToken: days
+        AccessToken: hours
+        IdToken: hours
+
+  # ========================================
+  # LAMBDA FUNCTIONS
+  # ========================================
+  
+  DiscoveryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'vaultpilot-discovery-${Environment}'
+      Runtime: nodejs18.x
+      Handler: index.discovery
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref CredentialsTable
+          AUDIT_TABLE: !Ref AuditLogsTable
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          const { DynamoDB, IAM, SecretsManager, SSM } = require('aws-sdk');
+          const { v4: uuidv4 } = require('uuid');
+          
+          const dynamodb = new DynamoDB.DocumentClient();
+          const iam = new IAM();
+          const secretsManager = new SecretsManager();
+          const ssm = new SSM();
+          
+          exports.discovery = async (event) => {
+            console.log('Starting credential discovery...');
+            
+            try {
+              const credentials = [];
+              
+              // 1. Discover IAM Access Keys
+              console.log('Scanning IAM access keys...');
+              const users = await iam.listUsers({}).promise();
+              
+              for (const user of users.Users) {
+                const accessKeys = await iam.listAccessKeys({ UserName: user.UserName }).promise();
+                
+                for (const key of accessKeys.AccessKeyMetadata) {
+                  const age = Math.floor((Date.now() - key.CreateDate.getTime()) / (1000 * 60 * 60 * 24));
+                  
+                  const credential = {
+                    id: uuidv4(),
+                    tenantId: 'default',
+                    name: `${user.UserName}-${key.AccessKeyId}`,
+                    type: 'AWS_IAM_KEY',
+                    environment: process.env.ENVIRONMENT,
+                    lastRotated: key.CreateDate.toISOString(),
+                    expiresIn: 90 - age,
+                    status: age > 90 ? 'expired' : age > 75 ? 'expiring' : 'active',
+                    source: 'IAM',
+                    metadata: {
+                      userName: user.UserName,
+                      accessKeyId: key.AccessKeyId,
+                      status: key.Status,
+                      createDate: key.CreateDate.toISOString(),
+                      ageInDays: age
+                    },
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                  };
+                  
+                  credentials.push(credential);
+                  
+                  // Store in DynamoDB
+                  await dynamodb.put({
+                    TableName: process.env.DYNAMODB_TABLE,
+                    Item: credential
+                  }).promise();
+                }
+              }
+              
+              // 2. Discover Secrets Manager secrets
+              console.log('Scanning Secrets Manager...');
+              const secrets = await secretsManager.listSecrets({}).promise();
+              
+              for (const secret of secrets.SecretList) {
+                const age = secret.LastChangedDate 
+                  ? Math.floor((Date.now() - secret.LastChangedDate.getTime()) / (1000 * 60 * 60 * 24))
+                  : 999;
+                
+                const credential = {
+                  id: uuidv4(),
+                  tenantId: 'default',
+                  name: secret.Name,
+                  type: 'SECRETS_MANAGER',
+                  environment: process.env.ENVIRONMENT,
+                  lastRotated: secret.LastChangedDate ? secret.LastChangedDate.toISOString() : 'Never',
+                  expiresIn: 90 - age,
+                  status: age > 90 ? 'expired' : age > 75 ? 'expiring' : 'active',
+                  source: 'SecretsManager',
+                  metadata: {
+                    arn: secret.ARN,
+                    description: secret.Description,
+                    rotationEnabled: secret.RotationEnabled,
+                    ageInDays: age
+                  },
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString()
+                };
+                
+                credentials.push(credential);
+                
+                await dynamodb.put({
+                  TableName: process.env.DYNAMODB_TABLE,
+                  Item: credential
+                }).promise();
+              }
+              
+              // Log discovery activity
+              await dynamodb.put({
+                TableName: process.env.AUDIT_TABLE,
+                Item: {
+                  id: uuidv4(),
+                  timestamp: new Date().toISOString(),
+                  action: 'discovery',
+                  description: `Discovered ${credentials.length} credentials`,
+                  metadata: {
+                    credentialsFound: credentials.length,
+                    iamKeys: credentials.filter(c => c.type === 'AWS_IAM_KEY').length,
+                    secrets: credentials.filter(c => c.type === 'SECRETS_MANAGER').length
+                  },
+                  ttl: Math.floor(Date.now() / 1000) + (90 * 24 * 60 * 60) // 90 days
+                }
+              }).promise();
+              
+              return {
+                statusCode: 200,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({
+                  message: 'Discovery completed successfully',
+                  credentialsFound: credentials.length,
+                  credentials: credentials
+                })
+              };
+            } catch (error) {
+              console.error('Discovery error:', error);
+              
+              return {
+                statusCode: 500,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({
+                  error: 'Discovery failed',
+                  message: error.message
+                })
+              };
+            }
+          };
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  RotationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'vaultpilot-rotation-${Environment}'
+      Runtime: nodejs18.x
+      Handler: index.rotation
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref CredentialsTable
+          AUDIT_TABLE: !Ref AuditLogsTable
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          const { DynamoDB, IAM, SecretsManager, SNS } = require('aws-sdk');
+          const crypto = require('crypto');
+          
+          const dynamodb = new DynamoDB.DocumentClient();
+          const iam = new IAM();
+          const secretsManager = new SecretsManager();
+          const sns = new SNS();
+          
+          exports.rotation = async (event) => {
+            console.log('Starting credential rotation...');
+            
+            try {
+              // Get credentials that need rotation (expiring in < 15 days)
+              const result = await dynamodb.scan({
+                TableName: process.env.DYNAMODB_TABLE,
+                FilterExpression: 'expiresIn < :threshold AND #status IN (:expiring, :expired)',
+                ExpressionAttributeNames: {
+                  '#status': 'status'
+                },
+                ExpressionAttributeValues: {
+                  ':threshold': 15,
+                  ':expiring': 'expiring',
+                  ':expired': 'expired'
+                }
+              }).promise();
+              
+              const credentialsToRotate = result.Items || [];
+              console.log(`Found ${credentialsToRotate.length} credentials to rotate`);
+              
+              const rotationResults = [];
+              
+              for (const credential of credentialsToRotate) {
+                try {
+                  console.log(`Rotating credential: ${credential.name}`);
+                  
+                  let rotationResult = {};
+                  
+                  // Rotate based on type
+                  if (credential.type === 'AWS_IAM_KEY') {
+                    rotationResult = await rotateIAMKey(credential);
+                  } else if (credential.type === 'SECRETS_MANAGER') {
+                    rotationResult = await rotateSecret(credential);
+                  }
+                  
+                  // Update credential in DynamoDB
+                  await dynamodb.update({
+                    TableName: process.env.DYNAMODB_TABLE,
+                    Key: { id: credential.id },
+                    UpdateExpression: 'SET #status = :status, lastRotated = :lastRotated, expiresIn = :expiresIn, updatedAt = :updatedAt',
+                    ExpressionAttributeNames: {
+                      '#status': 'status'
+                    },
+                    ExpressionAttributeValues: {
+                      ':status': 'active',
+                      ':lastRotated': new Date().toISOString(),
+                      ':expiresIn': 90,
+                      ':updatedAt': new Date().toISOString()
+                    }
+                  }).promise();
+                  
+                  // Log rotation
+                  await logRotation(credential, 'success', rotationResult);
+                  
+                  // Send notification
+                  await sns.publish({
+                    TopicArn: process.env.SNS_TOPIC_ARN,
+                    Subject: `✅ VaultPilot: Credential Rotated - ${credential.name}`,
+                    Message: `Credential "${credential.name}" (${credential.type}) was successfully rotated.\n\nDetails:\n- Type: ${credential.type}\n- Environment: ${credential.environment}\n- Rotated At: ${new Date().toISOString()}\n- Next Rotation: ${new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString()}`
+                  }).promise();
+                  
+                  rotationResults.push({
+                    credential: credential.name,
+                    status: 'success'
+                  });
+                  
+                } catch (error) {
+                  console.error(`Failed to rotate ${credential.name}:`, error);
+                  await logRotation(credential, 'failed', { error: error.message });
+                  
+                  rotationResults.push({
+                    credential: credential.name,
+                    status: 'failed',
+                    error: error.message
+                  });
+                }
+              }
+              
+              return {
+                statusCode: 200,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({
+                  message: 'Rotation completed',
+                  credentialsRotated: rotationResults.length,
+                  results: rotationResults
+                })
+              };
+            } catch (error) {
+              console.error('Rotation error:', error);
+              
+              return {
+                statusCode: 500,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({
+                  error: 'Rotation failed',
+                  message: error.message
+                })
+              };
+            }
+          };
+          
+          async function rotateIAMKey(credential) {
+            const userName = credential.metadata.userName;
+            const oldKeyId = credential.metadata.accessKeyId;
+            
+            console.log(`Creating new IAM access key for user: ${userName}`);
+            const newKey = await iam.createAccessKey({ UserName: userName }).promise();
+            
+            console.log(`Deactivating old key: ${oldKeyId}`);
+            await iam.updateAccessKey({
+              UserName: userName,
+              AccessKeyId: oldKeyId,
+              Status: 'Inactive'
+            }).promise();
+            
+            // Wait a bit for services to potentially pick up new key
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            console.log(`Deleting old key: ${oldKeyId}`);
+            await iam.deleteAccessKey({
+              UserName: userName,
+              AccessKeyId: oldKeyId
+            }).promise();
+            
+            // Store new key in Secrets Manager
+            await secretsManager.createSecret({
+              Name: `vaultpilot/${userName}/access-key`,
+              Description: `Rotated IAM access key for ${userName}`,
+              SecretString: JSON.stringify({
+                AccessKeyId: newKey.AccessKey.AccessKeyId,
+                SecretAccessKey: newKey.AccessKey.SecretAccessKey,
+                RotatedAt: new Date().toISOString()
+              })
+            }).promise().catch(async (err) => {
+              if (err.code === 'ResourceExistsException') {
+                await secretsManager.putSecretValue({
+                  SecretId: `vaultpilot/${userName}/access-key`,
+                  SecretString: JSON.stringify({
+                    AccessKeyId: newKey.AccessKey.AccessKeyId,
+                    SecretAccessKey: newKey.AccessKey.SecretAccessKey,
+                    RotatedAt: new Date().toISOString()
+                  })
+                }).promise();
+              } else {
+                throw err;
+              }
+            });
+            
+            return {
+              oldKeyId,
+              newKeyId: newKey.AccessKey.AccessKeyId,
+              secretName: `vaultpilot/${userName}/access-key`
+            };
+          }
+          
+          async function rotateSecret(credential) {
+            const secretName = credential.name;
+            
+            console.log(`Rotating secret: ${secretName}`);
+            
+            // Generate new secure password
+            const newPassword = generateSecurePassword(32);
+            
+            await secretsManager.putSecretValue({
+              SecretId: secretName,
+              SecretString: newPassword
+            }).promise();
+            
+            return {
+              secretName,
+              rotated: true
+            };
+          }
+          
+          async function logRotation(credential, status, details) {
+            await dynamodb.put({
+              TableName: process.env.AUDIT_TABLE,
+              Item: {
+                id: crypto.randomUUID(),
+                timestamp: new Date().toISOString(),
+                action: 'rotation',
+                description: `Credential rotation ${status}: ${credential.name}`,
+                metadata: {
+                  credentialId: credential.id,
+                  credentialName: credential.name,
+                  credentialType: credential.type,
+                  status,
+                  details
+                },
+                ttl: Math.floor(Date.now() / 1000) + (90 * 24 * 60 * 60)
+              }
+            }).promise();
+          }
+          
+          function generateSecurePassword(length = 32) {
+            const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+';
+            let password = '';
+            const randomBytes = crypto.randomBytes(length);
+            
+            for (let i = 0; i < length; i++) {
+              password += charset[randomBytes[i] % charset.length];
+            }
+            
+            return password;
+          }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ========================================
+  # API GATEWAY
+  # ========================================
+  
+  ApiGateway:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'vaultpilot-api-${Environment}'
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - '*'
+
+  ApiGatewayStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ApiGateway
+      StageName: '$default'
+      AutoDeploy: true
+
+  # Discovery Lambda Integration
+  DiscoveryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DiscoveryFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  DiscoveryRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'POST /discovery'
+      Target: !Sub 'integrations/${DiscoveryIntegration}'
+
+  DiscoveryPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DiscoveryFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'
+
+  # Rotation Lambda Integration
+  RotationIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RotationFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  RotationRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'POST /rotation'
+      Target: !Sub 'integrations/${RotationIntegration}'
+
+  RotationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RotationFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'
+
+  # ========================================
+  # SCHEDULED ROTATION (EventBridge)
+  # ========================================
+  
+  ScheduledRotationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'vaultpilot-scheduled-rotation-${Environment}'
+      Description: 'Trigger credential rotation daily'
+      ScheduleExpression: 'rate(1 day)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt RotationFunction.Arn
+          Id: RotationFunctionTarget
+
+  ScheduledRotationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RotationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledRotationRule.Arn
+
+  ScheduledDiscoveryRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'vaultpilot-scheduled-discovery-${Environment}'
+      Description: 'Trigger credential discovery every 6 hours'
+      ScheduleExpression: 'rate(6 hours)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DiscoveryFunction.Arn
+          Id: DiscoveryFunctionTarget
+
+  ScheduledDiscoveryPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DiscoveryFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledDiscoveryRule.Arn
+
+  # ========================================
+  # SNS TOPIC FOR NOTIFICATIONS
+  # ========================================
+  
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'vaultpilot-notifications-${Environment}'
+      DisplayName: 'VaultPilot Credential Rotation Notifications'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ========================================
+  # CLOUDWATCH ALARMS
+  # ========================================
+  
+  RotationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'VaultPilot-RotationErrors-${Environment}'
+      AlarmDescription: 'Alert when rotation function has errors'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RotationFunction
+      AlarmActions:
+        - !Ref NotificationTopic
+
+Outputs:
+  ApiEndpoint:
+    Description: 'API Gateway endpoint URL'
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  UserPoolId:
+    Description: 'Cognito User Pool ID'
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolId'
+
+  UserPoolClientId:
+    Description: 'Cognito User Pool Client ID'
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolClientId'
+
+  CredentialsTableName:
+    Description: 'DynamoDB Credentials Table Name'
+    Value: !Ref CredentialsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-CredentialsTable'
+
+  AuditLogsTableName:
+    Description: 'DynamoDB Audit Logs Table Name'
+    Value: !Ref AuditLogsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-AuditLogsTable'
+
+  NotificationTopicArn:
+    Description: 'SNS Topic ARN for notifications'
+    Value: !Ref NotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopic'
+
+  DiscoveryFunctionName:
+    Description: 'Discovery Lambda Function Name'
+    Value: !Ref DiscoveryFunction
+
+  RotationFunctionName:
+    Description: 'Rotation Lambda Function Name'
+    Value: !Ref RotationFunction
+
+  WebsiteURL:
+    Description: 'Frontend S3 Website URL'
+    Value: 'http://vaultpilot-frontend-dev-97123192.s3-website-us-east-1.amazonaws.com'
+
+  SetupInstructions:
+    Description: 'Next steps to complete setup'
+    Value: !Sub |
+      1. Subscribe to SNS notifications: aws sns subscribe --topic-arn ${NotificationTopic} --protocol email --notification-endpoint your-email@example.com
+      2. Update frontend with API endpoint: ${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com
+      3. Create first Cognito user: aws cognito-idp admin-create-user --user-pool-id ${UserPool} --username admin@vaultpilot.com
+      4. Test discovery: curl -X POST https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/discovery
+      5. Test rotation: curl -X POST https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/rotation
