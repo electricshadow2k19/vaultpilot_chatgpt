@@ -16,6 +16,20 @@ import {
 } from 'lucide-react';
 import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
 
+// Hackathon strategy: IAM Keys = production-ready, others = Beta/Demo
+const BETA_TYPES = ['SMTP_PASSWORD', 'RDS_PASSWORD', 'SECRETS_MANAGER'];
+const getTypeDisplay = (type: string) => {
+  const labels: Record<string, string> = {
+    AWS_IAM_KEY: 'IAM Keys',
+    SMTP_PASSWORD: 'SMTP',
+    RDS_PASSWORD: 'Database',
+    SECRETS_MANAGER: 'Secrets Manager'
+  };
+  const label = labels[type] || type?.replace(/_/g, ' ') || type;
+  return BETA_TYPES.includes(type) ? `${label} (Beta / Demo)` : label;
+};
+const isProductionRotation = (type: string) => type === 'AWS_IAM_KEY';
+
 const Dashboard: React.FC = () => {
   const [stats, setStats] = useState({
     totalAccounts: 0,
@@ -331,10 +345,10 @@ const Dashboard: React.FC = () => {
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500"
             >
               <option value="all">All Types</option>
-              <option value="AWS_IAM_KEY">IAM Keys</option>
-              <option value="SMTP_PASSWORD">SMTP</option>
-              <option value="RDS_PASSWORD">Database</option>
-              <option value="SECRETS_MANAGER">Secrets Manager</option>
+              <option value="AWS_IAM_KEY">IAM Keys ✓</option>
+              <option value="SMTP_PASSWORD">SMTP (Beta / Demo)</option>
+              <option value="RDS_PASSWORD">Database (Beta / Demo)</option>
+              <option value="SECRETS_MANAGER">Secrets Manager (Beta / Demo)</option>
             </select>
           </div>
 
@@ -384,7 +398,12 @@ const Dashboard: React.FC = () => {
                     <div className="text-sm font-medium text-gray-900">{cred.name}</div>
                     <div className="text-xs text-gray-500">{cred.environment}</div>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{cred.type?.replace('_', ' ')}</td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <span className="text-sm text-gray-900">{getTypeDisplay(cred.type)}</span>
+                    {isProductionRotation(cred.type) && (
+                      <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">Production</span>
+                    )}
+                  </td>
                   <td className="px-6 py-4 whitespace-nowrap">{getStatusBadge(cred.status)}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{getAgeInDays(cred.lastRotated)} days</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">

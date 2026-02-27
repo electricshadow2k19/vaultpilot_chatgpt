@@ -90,6 +90,14 @@ functions:
           method: post
           cors: true
 
+  getAuditLogs:
+    handler: src/index.getAuditLogs
+    events:
+      - http:
+          path: /audit
+          method: get
+          cors: true
+
 resources:
   Resources:
     AccountsTable:

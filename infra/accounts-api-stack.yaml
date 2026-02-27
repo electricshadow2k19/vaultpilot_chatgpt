@@ -137,6 +137,8 @@ Resources:
                 return await testConnection(event);
               } else if (path.match(/\/accounts\/[^\/]+\/scan$/) && method === 'POST') {
                 return await scanAccount(event);
+              } else if ((path === '/audit' || path === '/audit/') && method === 'GET') {
+                return await getAuditLogs(event);
               }
               
               return {
@@ -322,6 +324,43 @@ Resources:
             }
           }
           
+          async function getAuditLogs(event) {
+            const range = event.queryStringParameters?.range || '7d';
+            const daysMatch = range.match(/^(\d+)/);
+            const daysAgo = daysMatch ? parseInt(daysMatch[1], 10) : 7;
+            
+            const cutoffDate = new Date();
+            cutoffDate.setDate(cutoffDate.getDate() - daysAgo);
+            const cutoffTimestamp = cutoffDate.toISOString();
+            
+            const result = await dynamodb.scan({
+              TableName: process.env.AUDIT_TABLE
+            }).promise();
+            
+            let logs = (result.Items || []).filter(log =>
+              !log.timestamp || log.timestamp >= cutoffTimestamp
+            );
+            
+            logs.sort((a, b) => {
+              const timeA = a.timestamp || '2000-01-01';
+              const timeB = b.timestamp || '2000-01-01';
+              return timeB.localeCompare(timeA);
+            });
+            
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify({
+                logs,
+                count: logs.length,
+                range: daysAgo
+              })
+            };
+          }
+          
           async function scanAccount(event) {
             // Placeholder - full implementation in backend/accounts/src/index.js
             return {
@@ -399,6 +438,13 @@ Resources:
     Properties:
       ApiId: !Ref ExistingApiId
       RouteKey: 'POST /accounts/{accountId}/scan'
+      Target: !Sub 'integrations/${AccountsIntegration}'
+
+  GetAuditLogsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ExistingApiId
+      RouteKey: 'GET /audit'
       Target: !Sub 'integrations/${AccountsIntegration}'
 
   AccountsPermission:

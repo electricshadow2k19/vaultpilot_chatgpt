@@ -628,6 +628,55 @@ exports.scanAccount = async (event) => {
 };
 
 /**
+ * Get audit logs from DynamoDB (real-time)
+ */
+exports.getAuditLogs = async (event) => {
+  try {
+    const range = event.queryStringParameters?.range || '7d';
+    const daysMatch = range.match(/^(\d+)/);
+    const daysAgo = daysMatch ? parseInt(daysMatch[1], 10) : 7;
+    
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - daysAgo);
+    const cutoffTimestamp = cutoffDate.toISOString();
+    
+    const result = await dynamodb.scan({
+      TableName: AUDIT_TABLE
+    }).promise();
+    
+    let logs = (result.Items || []).filter(log => 
+      !log.timestamp || log.timestamp >= cutoffTimestamp
+    );
+    
+    logs.sort((a, b) => {
+      const timeA = a.timestamp || '2000-01-01';
+      const timeB = b.timestamp || '2000-01-01';
+      return timeB.localeCompare(timeA);
+    });
+    
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({
+        logs,
+        count: logs.length,
+        range: daysAgo
+      })
+    };
+  } catch (error) {
+    console.error('Error fetching audit logs:', error);
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({
+        error: 'Failed to fetch audit logs',
+        message: error.message
+      })
+    };
+  }
+};
+
+/**
  * Helper function to log audit entries
  */
 async function logAudit(action, description, metadata) {

@@ -89,9 +89,11 @@
 
 ### 3. Demo (2–3 min)
 - **Live demo**: Open the VaultPilot dashboard
+- **Rotation**: Demo **IAM Keys** rotation (fully working) — highlight the green "Production" badge
+- **Other types**: SMTP, Database, Secrets Manager show "(Beta / Demo)" — reduces live failure risk
 - Show: Credential list, status (OK / Aging / Expired)
-- Show: "Rotate Now" button
-- Show: Audit logs
+- Show: "Rotate Now" button (Beta types show confirmation before attempting)
+- Show: Audit logs (real-time)
 - Show: AWS Accounts tab (multi-tenant)
 
 ### 4. Solution (1 min)
@@ -123,10 +125,23 @@
 
 ---
 
+## 🎯 Hackathon Demo Strategy (Clean + Reliable)
+
+| Credential Type | UI Label | Rotation | Risk |
+|-----------------|----------|----------|------|
+| **IAM Keys** | IAM Keys ✓ + "Production" badge | ✅ Fully working | Low |
+| **SMTP** | SMTP (Beta / Demo) | ⚠️ Demo mode | Reduced |
+| **Database** | Database (Beta / Demo) | ⚠️ Demo mode | Reduced |
+| **Secrets Manager** | Secrets Manager (Beta / Demo) | ⚠️ Demo mode | Reduced |
+
+**Why:** Focus the live demo on IAM Keys rotation (reliable). Keep SMTP, Database, Secrets Manager in the UI for completeness but label them Beta — if rotation fails, expectations are set.
+
+---
+
 ## 🚀 Pre-Hackathon Prep
 
 1. **Deploy frontend** — Ensure S3/CloudFront URL works
-2. **Use mock data** — If backend isn't ready, demo with realistic mock data
+2. **Demo IAM Keys rotation** — Fully working, production-ready
 3. **Record backup video** — In case live demo fails
 4. **Prepare 1-pager** — Problem, solution, tech, team
 5. **Practice pitch** — 5 min max, 3 rehearsals

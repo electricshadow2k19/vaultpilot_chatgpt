@@ -17,13 +17,28 @@ import {
 interface Credential {
   id: string;
   name: string;
-  type: 'AWS IAM' | 'Database' | 'SMTP' | 'GitHub' | 'API Token';
+  type: string;
+  rawType?: string;
   environment: string;
   lastRotated: string;
   expiresIn: string;
   status: 'active' | 'expired' | 'expiring' | 'rotating';
   description?: string;
 }
+
+// Hackathon strategy: IAM Keys = production-ready, others = Beta/Demo
+const BETA_TYPE_PATTERNS = ['SMTP', 'RDS', 'DATABASE', 'SECRETS'];
+const getTypeDisplay = (type: string) => {
+  if (!type) return 'Unknown';
+  const normalized = type.toUpperCase().replace(/\s/g, '_');
+  const isBeta = BETA_TYPE_PATTERNS.some(p => normalized.includes(p));
+  const label = type.replace(/_/g, ' ');
+  return isBeta ? `${label} (Beta / Demo)` : label;
+};
+const isProductionRotation = (type: string) => {
+  const n = (type || '').toUpperCase().replace(/\s/g, '_');
+  return n.includes('IAM') || n.includes('AWS_IAM');
+};
 
 const Credentials: React.FC = () => {
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -54,7 +69,8 @@ const Credentials: React.FC = () => {
         const formattedCredentials = allCredentials.map((cred: any) => ({
           id: cred.id,
           name: cred.name,
-          type: cred.type?.replace('_', ' ') || 'Unknown',
+          type: cred.type?.replace(/_/g, ' ') || 'Unknown',
+          rawType: cred.type,
           environment: cred.environment || 'production',
           lastRotated: cred.lastRotated ? new Date(cred.lastRotated).toLocaleDateString() : 'Never',
           expiresIn: cred.expiresIn > 0 ? `${cred.expiresIn} days` : cred.expiresIn < 0 ? 'Expired' : 'N/A',
@@ -77,20 +93,13 @@ const Credentials: React.FC = () => {
   };
 
   const getTypeIcon = (type: string) => {
-    switch (type) {
-      case 'AWS IAM':
-        return <Server className="h-5 w-5 text-orange-500" />;
-      case 'Database':
-        return <Database className="h-5 w-5 text-blue-500" />;
-      case 'SMTP':
-        return <Mail className="h-5 w-5 text-green-500" />;
-      case 'GitHub':
-        return <Github className="h-5 w-5 text-gray-800" />;
-      case 'API Token':
-        return <Key className="h-5 w-5 text-purple-500" />;
-      default:
-        return <Key className="h-5 w-5 text-gray-500" />;
-    }
+    const t = (type || '').toUpperCase();
+    if (t.includes('IAM') || t.includes('AWS')) return <Server className="h-5 w-5 text-orange-500" />;
+    if (t.includes('RDS') || t.includes('DATABASE')) return <Database className="h-5 w-5 text-blue-500" />;
+    if (t.includes('SMTP')) return <Mail className="h-5 w-5 text-green-500" />;
+    if (t.includes('SECRETS')) return <Key className="h-5 w-5 text-purple-500" />;
+    if (t.includes('GITHUB')) return <Github className="h-5 w-5 text-gray-800" />;
+    return <Key className="h-5 w-5 text-gray-500" />;
   };
 
   const getStatusColor = (status: string) => {
@@ -108,24 +117,38 @@ const Credentials: React.FC = () => {
     }
   };
 
+  const typeMatchesFilter = (rawType: string) => {
+    if (filterType === 'all') return true;
+    const r = (rawType || '').toUpperCase();
+    if (filterType === 'AWS IAM') return r.includes('IAM') || r.includes('AWS_IAM');
+    if (filterType === 'Database') return r.includes('RDS') || r.includes('DATABASE');
+    if (filterType === 'SMTP') return r.includes('SMTP');
+    if (filterType === 'Secrets Manager') return r.includes('SECRETS');
+    return r.includes(filterType.toUpperCase().replace(/\s/g, '_'));
+  };
+
   const filteredCredentials = credentials.filter(cred => {
     const matchesSearch = cred.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                          cred.description?.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesType = filterType === 'all' || cred.type === filterType;
+    const matchesType = filterType === 'all' || typeMatchesFilter(cred.rawType || cred.type);
     const matchesStatus = filterStatus === 'all' || cred.status === filterStatus;
     
     return matchesSearch && matchesType && matchesStatus;
   });
 
-  const handleRotate = (id: string) => {
+  const handleRotate = (credential: Credential) => {
+    const isBeta = !isProductionRotation(credential.rawType || credential.type);
+    if (isBeta && !window.confirm(`${credential.name} is in Beta/Demo mode. Only IAM Keys rotation is fully supported. Continue anyway?`)) {
+      return;
+    }
     setCredentials(prev => prev.map(cred => 
-      cred.id === id ? { ...cred, status: 'rotating' as const } : cred
+      cred.id === credential.id ? { ...cred, status: 'rotating' as const } : cred
     ));
     
     // Simulate rotation process
     setTimeout(() => {
       setCredentials(prev => prev.map(cred => 
-        cred.id === id ? { 
+        cred.id === credential.id ? { 
           ...cred, 
           status: 'active' as const, 
           lastRotated: new Date().toISOString().split('T')[0],
@@ -176,9 +199,10 @@ const Credentials: React.FC = () => {
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
             >
               <option value="all">All Types</option>
-              <option value="AWS IAM">AWS IAM</option>
-              <option value="Database">Database</option>
-              <option value="SMTP">SMTP</option>
+              <option value="AWS IAM">IAM Keys ✓</option>
+              <option value="Database">Database (Beta / Demo)</option>
+              <option value="SMTP">SMTP (Beta / Demo)</option>
+              <option value="Secrets Manager">Secrets Manager (Beta / Demo)</option>
               <option value="GitHub">GitHub</option>
               <option value="API Token">API Token</option>
             </select>
@@ -210,7 +234,12 @@ const Credentials: React.FC = () => {
                 {getTypeIcon(credential.type)}
                 <div className="ml-3">
                   <h3 className="text-lg font-semibold text-gray-900">{credential.name}</h3>
-                  <p className="text-sm text-gray-500">{credential.type}</p>
+                  <p className="text-sm text-gray-500">
+                    {getTypeDisplay(credential.type)}
+                    {isProductionRotation(credential.type) && (
+                      <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">Production</span>
+                    )}
+                  </p>
                 </div>
               </div>
               <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(credential.status)}`}>
@@ -238,7 +267,7 @@ const Credentials: React.FC = () => {
             
             <div className="flex space-x-2">
               <button
-                onClick={() => handleRotate(credential.id)}
+                onClick={() => handleRotate(credential)}
                 disabled={credential.status === 'rotating'}
                 className="flex-1 bg-primary-600 text-white px-3 py-2 rounded text-sm font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
               >

@@ -1,15 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Search, 
-  Filter, 
   Download, 
   Calendar,
   User,
   Key,
   AlertTriangle,
   CheckCircle,
-  Clock
+  Clock,
+  RefreshCw
 } from 'lucide-react';
+
+const API_ENDPOINT = process.env.REACT_APP_API_ENDPOINT || 'https://t9abv3wghl.execute-api.us-east-1.amazonaws.com';
 
 interface AuditLog {
   id: string;
@@ -23,6 +25,8 @@ interface AuditLog {
   ipAddress: string;
 }
 
+const POLL_INTERVAL_MS = 15000; // Real-time: refresh every 15 seconds
+
 const Audit: React.FC = () => {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -30,129 +34,60 @@ const Audit: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState('all');
   const [dateRange, setDateRange] = useState('7d');
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const API_ENDPOINT = 'https://t9abv3wghl.execute-api.us-east-1.amazonaws.com';
 
-  useEffect(() => {
-    fetchAuditLogs();
-  }, [dateRange]);
-
-  // Sample audit logs for demo when API returns no data
-  const getMockAuditLogs = (): AuditLog[] => {
-    const now = new Date();
-    return [
-      {
-        id: '1',
-        timestamp: new Date(now.getTime() - 5 * 60000).toISOString(),
-        action: 'Credential Rotation',
-        credentialName: 'test/smtp-password-demo',
-        credentialType: 'SMTP Password',
-        user: 'system',
-        status: 'success',
-        details: 'SMTP password rotated successfully. New credential stored in Secrets Manager.',
-        ipAddress: '10.0.1.45'
-      },
-      {
-        id: '2',
-        timestamp: new Date(now.getTime() - 2 * 3600000).toISOString(),
-        action: 'Credential Discovery',
-        credentialName: 'test/database-password-demo',
-        credentialType: 'RDS Password',
-        user: 'system',
-        status: 'success',
-        details: 'Discovered 2 credentials in account 700880967608. Age check completed.',
-        ipAddress: '10.0.1.45'
-      },
-      {
-        id: '3',
-        timestamp: new Date(now.getTime() - 24 * 3600000).toISOString(),
-        action: 'Credential Rotation',
-        credentialName: 'test/database-password-demo',
-        credentialType: 'RDS Password',
-        user: 'demo@vaultpilot.com',
-        status: 'success',
-        details: 'RDS password rotated. ECS service prod-api restarted to pick up new credentials.',
-        ipAddress: '192.168.1.100'
-      },
-      {
-        id: '4',
-        timestamp: new Date(now.getTime() - 48 * 3600000).toISOString(),
-        action: 'Credential Access',
-        credentialName: 'test/smtp-password-demo',
-        credentialType: 'SMTP Password',
-        user: 'demo@vaultpilot.com',
-        status: 'success',
-        details: 'Credential accessed for email service configuration.',
-        ipAddress: '192.168.1.100'
-      },
-      {
-        id: '5',
-        timestamp: new Date(now.getTime() - 72 * 3600000).toISOString(),
-        action: 'Credential Discovery',
-        credentialName: 'arn:aws:iam::411474509059:role/VaultPilotAccess',
-        credentialType: 'IAM Role',
-        user: 'system',
-        status: 'success',
-        details: 'Account scan completed. Found 0 credentials in tga account.',
-        ipAddress: '10.0.1.45'
-      },
-      {
-        id: '6',
-        timestamp: new Date(now.getTime() - 96 * 3600000).toISOString(),
-        action: 'Credential Rotation',
-        credentialName: 'prod/api-key',
-        credentialType: 'API Token',
-        user: 'system',
-        status: 'warning',
-        details: 'Rotation scheduled. Retry pending - service was temporarily unavailable.',
-        ipAddress: '10.0.1.45'
-      }
-    ];
+  const formatLog = (log: any): AuditLog => {
+    const meta = log.metadata || {};
+    return {
+      id: log.id || log.timestamp || `log-${Math.random()}`,
+      timestamp: log.timestamp || log.createdAt || new Date().toISOString(),
+      action: (log.action || 'unknown').replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase()),
+      credentialName: meta.credentialName || meta.accountName || meta.arn || 'N/A',
+      credentialType: meta.credentialType || meta.type || 'N/A',
+      user: meta.user || meta.accountId || 'system',
+      status: (meta.status || 'success') as 'success' | 'failed' | 'warning',
+      details: log.description || log.details || 'No details available',
+      ipAddress: meta.ipAddress || 'N/A'
+    };
   };
 
-  const fetchAuditLogs = async () => {
+  const fetchAuditLogs = useCallback(async () => {
     try {
       setLoading(true);
+      setError(null);
       
-      // Fetch from DynamoDB audit logs table
-      const response = await fetch(`${API_ENDPOINT}/audit?range=${dateRange}`).catch(() => null);
+      const response = await fetch(`${API_ENDPOINT}/audit?range=${dateRange}`);
       
-      if (response && response.ok) {
-        const data = await response.json();
-        const logs = data.logs || [];
-        
-        if (logs.length > 0) {
-          // Transform audit logs to UI format
-          const formattedLogs = logs.map((log: any) => ({
-            id: log.id,
-            timestamp: log.timestamp,
-            action: log.action?.replace('_', ' ').replace(/\b\w/g, (l: string) => l.toUpperCase()) || 'Unknown Action',
-            credentialName: log.metadata?.credentialName || 'N/A',
-            credentialType: log.metadata?.credentialType || 'N/A',
-            user: log.metadata?.user || 'system',
-            status: log.metadata?.status || 'success',
-            details: log.description || 'No details available',
-            ipAddress: log.metadata?.ipAddress || 'N/A'
-          }));
-          
-          setAuditLogs(formattedLogs);
-        } else {
-          // Use mock data when API returns empty (for demo)
-          setAuditLogs(getMockAuditLogs());
-        }
-      } else {
-        // Use mock data when API is unavailable (for demo)
-        setAuditLogs(getMockAuditLogs());
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
       }
       
-    } catch (error) {
-      console.error('Error fetching audit logs:', error);
-      // Use mock data on error (for demo)
-      setAuditLogs(getMockAuditLogs());
+      const data = await response.json();
+      const logs = (data.logs || []).map(formatLog);
+      
+      setAuditLogs(logs);
+      setLastUpdated(new Date());
+    } catch (err) {
+      console.error('Error fetching audit logs:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch audit logs');
+      setAuditLogs([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [dateRange, API_ENDPOINT]);
+
+  // Initial fetch and when date range changes
+  useEffect(() => {
+    fetchAuditLogs();
+  }, [fetchAuditLogs]);
+
+  // Real-time polling
+  useEffect(() => {
+    const interval = setInterval(fetchAuditLogs, POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [fetchAuditLogs]);
 
 
   const getStatusIcon = (status: string) => {
@@ -232,15 +167,36 @@ const Audit: React.FC = () => {
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Audit Logs</h1>
           <p className="mt-2 text-gray-600">Monitor all credential-related activities and security events</p>
+          {lastUpdated && (
+            <p className="mt-1 text-sm text-gray-500">
+              Last updated: {lastUpdated.toLocaleTimeString()} • Auto-refreshes every 15s
+            </p>
+          )}
         </div>
-        <button
-          onClick={exportLogs}
-          className="bg-primary-600 text-white px-4 py-2 rounded-lg hover:bg-primary-700 flex items-center"
-        >
-          <Download className="h-5 w-5 mr-2" />
-          Export CSV
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={fetchAuditLogs}
+            disabled={loading}
+            className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 flex items-center disabled:opacity-50"
+          >
+            <RefreshCw className={`h-5 w-5 mr-2 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+          <button
+            onClick={exportLogs}
+            className="bg-primary-600 text-white px-4 py-2 rounded-lg hover:bg-primary-700 flex items-center"
+          >
+            <Download className="h-5 w-5 mr-2" />
+            Export CSV
+          </button>
+        </div>
       </div>
+
+      {error && (
+        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+          {error} — Ensure the audit API is deployed and the vaultpilot-audit-logs-prod DynamoDB table exists.
+        </div>
+      )}
 
       {/* Filters */}
       <div className="bg-white rounded-lg shadow p-6 mb-6">
@@ -375,14 +331,19 @@ const Audit: React.FC = () => {
           </table>
         </div>
         
-        {filteredLogs.length === 0 && (
+        {loading && auditLogs.length === 0 ? (
+          <div className="text-center py-12">
+            <RefreshCw className="mx-auto h-12 w-12 text-gray-400 animate-spin" />
+            <h3 className="mt-2 text-sm font-medium text-gray-900">Loading audit logs...</h3>
+          </div>
+        ) : filteredLogs.length === 0 && (
           <div className="text-center py-12">
             <Calendar className="mx-auto h-12 w-12 text-gray-400" />
             <h3 className="mt-2 text-sm font-medium text-gray-900">No audit logs found</h3>
             <p className="mt-1 text-sm text-gray-500">
               {searchTerm || filterAction !== 'all' || filterStatus !== 'all' 
                 ? 'Try adjusting your search or filters.'
-                : 'Audit logs will appear here as activities occur.'
+                : 'Audit logs will appear here when you add accounts, run scans, or rotate credentials.'
               }
             </p>
           </div>
